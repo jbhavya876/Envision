@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+// The message the Client sends to the Server
+message BetRequest {
+    double betAmount = 1;
+    double target = 2;
+    string condition = 3;
+    string clientSeed = 4;
+}
+
+// The message the Server sends back
+message GameResponse {
+    double roll = 1;
+    bool isWin = 2;
+    double profit = 3;
+    double newBalance = 4;
+    double betAmount = 5;
+    string serverSeedRevealed = 6;
+    string clientSeed = 7;
+    int32 nonce = 8;
+    string nextServerSeedHash = 9;
+    string error = 10; // In case something goes wrong
+}
