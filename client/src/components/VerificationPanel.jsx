@@ -1,9 +1,29 @@
+/**
+ * @file VerificationPanel Component
+ * @description Provably fair verification interface.
+ * Allows users to verify the fairness of their bets by:
+ * 1. Checking the HMAC-SHA256 calculation matches the roll result
+ * 2. Verifying the revealed seed hashes to the previous anchor
+ * 
+ * @component
+ * @param {Object} props
+ * @param {string} props.activeHash - Current server seed hash (anchor)
+ * @param {string} props.lastSeed - Last revealed server seed
+ * @param {string|number} props.lastNonce - Last bet nonce
+ * @param {string} props.lastClientSeed - Last client seed used
+ * @param {number} props.actualRoll - Actual roll result to verify
+ */
+
 import React, { useState } from 'react';
 import CryptoJS from 'crypto-js';
 
 const VerificationPanel = ({ activeHash, lastSeed, lastNonce, lastClientSeed, actualRoll }) => {
     const [verificationResult, setVerificationResult] = useState('');
 
+    /**
+     * Verify the last bet's fairness
+     * Performs both math verification (HMAC) and chain verification (SHA256)
+     */
     const verifyLastBet = () => {
         if (lastSeed === 'No bets yet') {
             setVerificationResult('');

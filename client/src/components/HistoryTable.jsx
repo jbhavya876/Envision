@@ -1,3 +1,13 @@
+/**
+ * @file HistoryTable Component
+ * @description Displays the last 15 bets in a table format.
+ * Shows nonce, roll result, bet amount, and profit/loss.
+ * 
+ * @component
+ * @param {Object} props
+ * @param {Array<Object>} props.history - Array of bet history objects
+ */
+
 import React from 'react';
 
 const HistoryTable = ({ history }) => {

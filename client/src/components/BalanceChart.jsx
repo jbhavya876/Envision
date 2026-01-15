@@ -1,3 +1,15 @@
+/**
+ * @file BalanceChart Component
+ * @description Real-time line chart displaying user balance over time.
+ * Uses Chart.js for visualization with gradient fill and smooth animations.
+ * 
+ * @component
+ * @param {Object} props
+ * @param {Object} props.chartData - Chart data object
+ * @param {Array<number>} props.chartData.labels - X-axis labels (nonces)
+ * @param {Array<number>} props.chartData.data - Y-axis data (balances)
+ */
+
 import React, { useEffect, useRef } from 'react';
 import { Chart, registerables } from 'chart.js';
 

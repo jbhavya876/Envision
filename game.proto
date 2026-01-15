@@ -1,23 +1,41 @@
+/**
+ * Protocol Buffer Schema for Binary Dice Casino
+ * 
+ * This schema defines the binary message format for efficient client-server communication.
+ * Using Protobuf reduces payload size and provides type safety.
+ * 
+ * Message Flow:
+ * 1. Client sends BetRequest with bet details
+ * 2. Server processes bet and returns GameResponse with results
+ * 3. Server also broadcasts GameResponse via Socket.IO for real-time updates
+ */
+
 syntax = "proto3";
 
-// The message the Client sends to the Server
+/**
+ * BetRequest - Client to Server
+ * Sent when a user places a bet
+ */
 message BetRequest {
-    double betAmount = 1;
-    double target = 2;
-    string condition = 3;
-    string clientSeed = 4;
+    double betAmount = 1;    // Amount to wager
+    double target = 2;       // Target number (default: 50)
+    string condition = 3;    // 'over' or 'under'
+    string clientSeed = 4;   // Client-provided randomness seed
 }
 
-// The message the Server sends back
+/**
+ * GameResponse - Server to Client
+ * Contains bet result and provably fair verification data
+ */
 message GameResponse {
-    double roll = 1;
-    bool isWin = 2;
-    double profit = 3;
-    double newBalance = 4;
-    double betAmount = 5;
-    string serverSeedRevealed = 6;
-    string clientSeed = 7;
-    int32 nonce = 8;
-    string nextServerSeedHash = 9;
-    string error = 10; // In case something goes wrong
+    double roll = 1;                  // Actual roll result (0.00-100.00)
+    bool isWin = 2;                   // Whether the bet won
+    double profit = 3;                // Profit/loss amount
+    double newBalance = 4;            // Updated user balance
+    double betAmount = 5;             // Amount that was wagered
+    string serverSeedRevealed = 6;    // Revealed server seed (for verification)
+    string clientSeed = 7;            // Client seed that was used
+    int32 nonce = 8;                  // Sequential bet number
+    string nextServerSeedHash = 9;    // Hash of next server seed
+    string error = 10;                // Error message if something went wrong
 }

@@ -1,3 +1,17 @@
+/**
+ * @file Binary Dice Casino - Main Application Component
+ * @description Root React component that manages the entire casino application.
+ * 
+ * Features:
+ * - JWT-based authentication with localStorage persistence
+ * - Real-time game updates via Socket.IO
+ * - Protobuf binary protocol for efficient data transfer
+ * - Provably fair gaming with client seed verification
+ * - Live balance chart and bet history
+ * 
+ * @component
+ */
+
 import React, { useState, useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 import protobuf from "protobufjs";
@@ -7,33 +21,87 @@ import VerificationPanel from "./components/VerificationPanel";
 import HistoryTable from "./components/HistoryTable";
 import AuthForm from "./components/AuthForm";
 
+/**
+ * Main Application Component
+ * Handles authentication, game state, and real-time updates
+ */
 function App() {
-  // --- STATE ---
+  // ============================================================================
+  // AUTHENTICATION STATE
+  // ============================================================================
+
+  /** JWT authentication token from localStorage */
   const [token, setToken] = useState(localStorage.getItem("token"));
+
+  /** Current logged-in username */
   const [username, setUsername] = useState(
     localStorage.getItem("username") || ""
   );
 
-  // Game State
+  // ============================================================================
+  // GAME STATE
+  // ============================================================================
+
+  /** User's current balance */
   const [balance, setBalance] = useState("...");
+
+  /** Last roll result (0.00-100.00) */
   const [rollResult, setRollResult] = useState("0.00");
+
+  /** Whether the last bet was a win */
   const [isWin, setIsWin] = useState(null);
+
+  /** Current server seed hash (for provably fair verification) */
   const [activeHash, setActiveHash] = useState("Loading...");
+
+  /** System ready state - true when Protobuf schema is loaded */
   const [isSystemReady, setIsSystemReady] = useState(false);
 
-  // Fairness State
+  // ============================================================================
+  // PROVABLY FAIR VERIFICATION STATE
+  // ============================================================================
+
+  /** Last revealed server seed */
   const [lastSeed, setLastSeed] = useState("No bets yet");
+
+  /** Last nonce (bet number) */
   const [lastNonce, setLastNonce] = useState("-");
+
+  /** Last client seed used */
   const [lastClientSeed, setLastClientSeed] = useState("");
+
+  /** Actual roll result for verification */
   const [actualRoll, setActualRoll] = useState(0);
+
+  /** Bet history (last 15 bets) */
   const [history, setHistory] = useState([]);
+
+  /** Chart data for balance visualization */
   const [chartData, setChartData] = useState({ labels: [], data: [] });
 
+  // ============================================================================
+  // REFS FOR SOCKET.IO AND PROTOBUF
+  // ============================================================================
+
+  /** Socket.IO connection reference */
   const socketRef = useRef(null);
+
+  /** Protobuf BetRequest message type */
   const BetRequestRef = useRef(null);
+
+  /** Protobuf GameResponse message type */
   const GameResponseRef = useRef(null);
 
-  // --- AUTH HANDLERS ---
+  // ============================================================================
+  // AUTHENTICATION HANDLERS
+  // ============================================================================
+
+  /**
+   * Handle successful login
+   * Stores token and username in localStorage and updates state
+   * @param {string} newToken - JWT authentication token
+   * @param {string} user - Username
+   */
   const handleLogin = (newToken, user) => {
     localStorage.setItem("token", newToken);
     localStorage.setItem("username", user);
@@ -41,6 +109,10 @@ function App() {
     setUsername(user);
   };
 
+  /**
+   * Handle user logout
+   * Clears localStorage and disconnects Socket.IO
+   */
   const handleLogout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("username");
@@ -49,7 +121,14 @@ function App() {
     if (socketRef.current) socketRef.current.disconnect();
   };
 
-  // --- INITIALIZATION ---
+  // ============================================================================
+  // INITIALIZATION & REAL-TIME UPDATES
+  // ============================================================================
+
+  /**
+   * Initialize Socket.IO connection and load Protobuf schema
+   * Runs when component mounts or token changes
+   */
   useEffect(() => {
     // 🔒 If not logged in, do nothing
     if (!token) return;
@@ -57,7 +136,7 @@ function App() {
     // 1. Initialize Socket.IO
     // Note: If using proxy in vite.config.js, you can just use io()
     // If explicit URL needed: io('http://localhost:3000')
-    socketRef.current = io(); 
+    socketRef.current = io();
 
     // 2. Load Protobuf Schema
     protobuf.load("/game.proto", (err, root) => {
@@ -96,7 +175,14 @@ function App() {
     };
   }, [token]);
 
-  // --- API CALLS ---
+  // ============================================================================
+  // API FUNCTIONS
+  // ============================================================================
+
+  /**
+   * Fetch initial game state from server
+   * Gets user balance, current seed hash, and nonce
+   */
   const fetchInitialState = async () => {
     try {
       const res = await fetch("/api/state", {
@@ -132,6 +218,12 @@ function App() {
     }
   };
 
+  /**
+   * Place a bet on the dice game
+   * @param {number} betAmount - Amount to wager
+   * @param {string} clientSeed - Client-provided randomness seed
+   * @param {string} condition - 'over' or 'under'
+   */
   const handlePlayGame = async (betAmount, clientSeed, condition) => {
     // 1. Check if System is Ready
     if (!BetRequestRef.current || !isSystemReady) {
@@ -169,7 +261,15 @@ function App() {
     }
   };
 
-  // --- UI UPDATER ---
+  // ============================================================================
+  // UI UPDATE HANDLER
+  // ============================================================================
+
+  /**
+   * Update dashboard with new game results
+   * Updates balance, history, chart, and verification data
+   * @param {Object} data - Game response data from server
+   */
   const updateDashboard = (data) => {
     setRollResult(data.roll.toFixed(2));
     setIsWin(data.isWin);

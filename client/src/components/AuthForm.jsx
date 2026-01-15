@@ -1,25 +1,40 @@
+/**
+ * @file AuthForm Component
+ * @description Login and registration form for user authentication.
+ * Handles both login and registration with toggle functionality.
+ * 
+ * @component
+ * @param {Object} props
+ * @param {Function} props.onLogin - Callback function called after successful login
+ */
+
 import React, { useState } from 'react';
 
 const AuthForm = ({ onLogin }) => {
+    // Form state
     const [isRegister, setIsRegister] = useState(false);
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
 
+    /**
+     * Handle form submission for login or registration
+     * @param {Event} e - Form submit event
+     */
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
-        
+
         const endpoint = isRegister ? '/api/register' : '/api/login';
-        
+
         const res = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password })
         });
-        
+
         const data = await res.json();
-        
+
         if (data.error) {
             setError(data.error);
         } else {
@@ -50,8 +65,8 @@ const AuthForm = ({ onLogin }) => {
                     {isRegister ? 'Sign Up' : 'Log In'}
                 </button>
             </form>
-            <p style={{ fontSize: '0.8rem', marginTop: '10px', cursor: 'pointer', color: '#b1bad3' }} 
-               onClick={() => setIsRegister(!isRegister)}>
+            <p style={{ fontSize: '0.8rem', marginTop: '10px', cursor: 'pointer', color: '#b1bad3' }}
+                onClick={() => setIsRegister(!isRegister)}>
                 {isRegister ? "Already have an account? Login" : "Need an account? Register"}
             </p>
         </div>
