@@ -11,6 +11,11 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+casino.db
+casino.db-shm
+casino.db-wal
+chain.json
 
 # Editor directories and files
 .vscode/*

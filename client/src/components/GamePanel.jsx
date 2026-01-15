@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-const GamePanel = ({ balance, rollResult, isWin, onPlayGame }) => {
+const GamePanel = ({ balance, rollResult, isWin, onPlayGame, isSystemReady }) => {
     const [betAmount, setBetAmount] = useState('10.00');
     const [clientSeed, setClientSeed] = useState('luckyClientSeed123');
 
@@ -25,6 +25,7 @@ const GamePanel = ({ balance, rollResult, isWin, onPlayGame }) => {
                 type="number"
                 value={betAmount}
                 onChange={(e) => setBetAmount(e.target.value)}
+                disabled={!isSystemReady}
             />
 
             <label>Client Seed</label>
@@ -32,14 +33,25 @@ const GamePanel = ({ balance, rollResult, isWin, onPlayGame }) => {
                 type="text"
                 value={clientSeed}
                 onChange={(e) => setClientSeed(e.target.value)}
+                disabled={!isSystemReady}
             />
 
             <div className="button-group">
-                <button className="btn-under" onClick={() => handlePlay('under')}>
-                    Under 50
+                <button
+                    className="btn-under"
+                    onClick={() => handlePlay('under')}
+                    disabled={!isSystemReady}
+                    style={{ opacity: isSystemReady ? 1 : 0.5, cursor: isSystemReady ? 'pointer' : 'not-allowed' }}
+                >
+                    {isSystemReady ? 'Under 50' : 'Loading...'}
                 </button>
-                <button className="btn-over" onClick={() => handlePlay('over')}>
-                    Over 50
+                <button
+                    className="btn-over"
+                    onClick={() => handlePlay('over')}
+                    disabled={!isSystemReady}
+                    style={{ opacity: isSystemReady ? 1 : 0.5, cursor: isSystemReady ? 'pointer' : 'not-allowed' }}
+                >
+                    {isSystemReady ? 'Over 50' : 'Loading...'}
                 </button>
             </div>
         </div>

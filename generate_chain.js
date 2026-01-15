@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 
-const CHAIN_SIZE = 1000; // In production, this would be 10,000,000
+const CHAIN_SIZE = 100; // In production, this would be 10,000,000
 
 console.log(`🔗 Generating Chain of ${CHAIN_SIZE} seeds...`);
 

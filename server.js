@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -6,25 +7,33 @@ const { Server } = require("socket.io");
 const db = require('./database');
 const protobuf = require('protobufjs');
 const fs = require('fs');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const path = require('path');
+
+const SECRET_KEY = process.env.SECRET_KEY || "super_secret_key_123";
+const PORT = process.env.PORT || 3000;
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: CORS_ORIGIN }));
 
-// IMPORTANT: We must read the body as a RAW BUFFER now, not JSON
+// 1. MIDDLEWARE
+app.use(express.json());
 app.use(express.raw({ type: 'application/octet-stream', limit: '1mb' }));
-// Allow static files
-app.use(express.static(__dirname + "/public"));
+// Serve React Build
+app.use(express.static(path.join(__dirname, 'client/dist')));
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: "*",
+        origin: CORS_ORIGIN,
         methods: ["GET", "POST"]
     }
 });
 
-// --- LOAD PROTOBUF SCHEMA ---
+// --- LOAD PROTOBUF (Server Side) ---
 let BetRequest, GameResponse;
 protobuf.load("game.proto", function (err, root) {
     if (err) throw err;
@@ -33,7 +42,7 @@ protobuf.load("game.proto", function (err, root) {
     console.log("📜 Binary Protocol Loaded!");
 });
 
-// --- LOAD THE CHAIN ---
+// --- LOAD CHAIN ---
 let seedChain = [];
 try {
     seedChain = JSON.parse(fs.readFileSync('chain.json'));
@@ -44,10 +53,10 @@ try {
 }
 
 // --- GAME STATE ---
-let previousServerSeed = seedChain[0]; // The Public Anchor
-let gameIndex = 1; // We start at index 1
+let previousServerSeed = seedChain[0];
+let gameIndex = 1;
 
-// --- HELPER: PROVABLY FAIR MATH (Re-added) ---
+// --- HELPERS ---
 function generateFairRoll(serverSeed, clientSeed, nonce) {
     const hmac = crypto.createHmac('sha256', serverSeed);
     hmac.update(`${clientSeed}:${nonce}`);
@@ -56,17 +65,10 @@ function generateFairRoll(serverSeed, clientSeed, nonce) {
     return (resultInt % 10001) / 100;
 }
 
-// --- HELPER: GET CURRENT SEED ---
 function getCurrentSeed() {
-    if (gameIndex >= seedChain.length) return null; // Chain exhausted
+    if (gameIndex >= seedChain.length) return null;
     return seedChain[gameIndex];
 }
-
-io.on('connection', (socket) => {
-    console.log('⚡ New Client Connected:', socket.id);
-});
-
-// --- API ROUTES ---
 
 function sendBinaryError(res, msg) {
     const payload = { error: msg };
@@ -76,12 +78,51 @@ function sendBinaryError(res, msg) {
     res.send(buffer);
 }
 
-app.get('/game.proto', (req, res) => {
-    res.sendFile(__dirname + '/game.proto');
+// --- AUTH MIDDLEWARE ---
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(401).json({ error: "Access Denied" });
+
+    jwt.verify(token, SECRET_KEY, (err, user) => {
+        if (err) return res.status(403).json({ error: "Invalid Token" });
+        req.user = user;
+        next();
+    });
+};
+
+// --- ROUTES ---
+
+// 1. REGISTER
+app.post('/api/register', (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: "Missing fields" });
+
+    const hash = bcrypt.hashSync(password, 10);
+    db.run("INSERT INTO users (username, password_hash) VALUES (?, ?)", [username, hash], function (err) {
+        if (err) return res.status(400).json({ error: "Username taken" });
+        res.json({ success: true, message: "Registered! Please login." });
+    });
 });
 
-app.get('/api/state', (req, res) => {
-    db.get("SELECT balance FROM users WHERE id = 1", (err, row) => {
+// 2. LOGIN
+app.post('/api/login', (req, res) => {
+    const { username, password } = req.body;
+    db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
+        if (!user) return res.status(400).json({ error: "User not found" });
+        if (bcrypt.compareSync(password, user.password_hash)) {
+            const token = jwt.sign({ id: user.id, username: user.username }, SECRET_KEY, { expiresIn: '1h' });
+            res.json({ token, username: user.username, balance: user.balance });
+        } else {
+            res.status(400).json({ error: "Invalid password" });
+        }
+    });
+});
+
+// 3. GET STATE
+app.get('/api/state', authenticateToken, (req, res) => {
+    db.get("SELECT balance FROM users WHERE id = ?", [req.user.id], (err, row) => {
         if (err || !row) return res.status(500).json({ error: "DB Error" });
         res.json({
             balance: row.balance,
@@ -91,34 +132,25 @@ app.get('/api/state', (req, res) => {
     });
 });
 
-app.post('/api/bet', (req, res) => {
+// 4. PLACE BET
+app.post('/api/bet', authenticateToken, (req, res) => {
     if (!BetRequest) return res.status(500).send("Proto not loaded");
 
     try {
         const decoded = BetRequest.decode(req.body);
         const { betAmount, target, condition, clientSeed } = BetRequest.toObject(decoded);
 
-        db.get("SELECT balance FROM users WHERE id = 1", (err, row) => {
+        db.get("SELECT balance FROM users WHERE id = ?", [req.user.id], (err, row) => {
             if (err) return sendBinaryError(res, "DB Error");
 
             let userBalance = row.balance;
+            if (betAmount > userBalance || betAmount <= 0) return sendBinaryError(res, "Insufficient funds");
 
-            if (betAmount > userBalance || betAmount <= 0) {
-                return sendBinaryError(res, "Insufficient funds");
-            }
-
-            // CAPTURE THE NONCE (Fixes the bug)
             const currentNonce = gameIndex;
-
-            // GET SEED & CALCULATE
             const seedUsed = getCurrentSeed();
-            if (!seedUsed) {
-                return sendBinaryError(res, "Casino is out of seeds! New chain needed.");
-            }
+            if (!seedUsed) return sendBinaryError(res, "Casino is out of seeds!");
 
-            // Re-added the missing helper call
             const rollResult = generateFairRoll(seedUsed, clientSeed, currentNonce);
-
             let isWin = false;
             let multiplier = 0;
 
@@ -140,36 +172,24 @@ app.post('/api/bet', (req, res) => {
                 profit = -betAmount;
             }
 
-            // 2. DB UPDATE (Fixed 'currentNonce' error)
-            db.run("UPDATE users SET balance = ? WHERE id = 1", [newBalance]);
+            // DB Updates
+            db.run("UPDATE users SET balance = ? WHERE id = ?", [newBalance, req.user.id]);
+            const insertSQL = `INSERT INTO bets (user_id, nonce, bet_amount, target, condition, roll, profit, client_seed, server_seed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+            db.run(insertSQL, [req.user.id, currentNonce, betAmount, target, condition, rollResult, profit, clientSeed, seedUsed]);
 
-            const insertSQL = `INSERT INTO bets (nonce, bet_amount, target, condition, roll, profit, client_seed, server_seed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
-            // ⚠️ FIX: Used 'gameIndex' instead of undefined 'currentNonce'
-            db.run(insertSQL, [currentNonce, betAmount, target, condition, rollResult, profit, clientSeed, seedUsed]);
-
-            // 3. MOVE CHAIN FORWARD
             previousServerSeed = seedUsed;
             gameIndex++;
 
-            // 4. RESPONSE
             const responsePayload = {
-                roll: rollResult,
-                isWin: isWin,
-                profit: profit,
-                newBalance: newBalance,
-                betAmount: betAmount,
-                serverSeedRevealed: seedUsed,
-                clientSeed: clientSeed,
-                nonce: currentNonce, // Updated
-                nextServerSeedHash: "See Chain Logic",
-                error: ""
+                roll: rollResult, isWin, profit, newBalance, betAmount,
+                serverSeedRevealed: seedUsed, clientSeed, nonce: currentNonce,
+                nextServerSeedHash: "See Chain Logic", error: ""
             };
 
             const message = GameResponse.create(responsePayload);
             const buffer = GameResponse.encode(message).finish();
 
             io.emit('game-update', buffer);
-
             res.set('Content-Type', 'application/octet-stream');
             res.send(buffer);
         });
@@ -180,7 +200,25 @@ app.post('/api/bet', (req, res) => {
     }
 });
 
-const PORT = 3000;
+// --- 🛑 FIX: Explicitly Serve Game Proto ---
+// This prevents the catch-all from swallowing the proto file request
+app.get('/game.proto', (req, res) => {
+    // Try to find it in client/public first (Dev mode)
+    const clientPath = path.join(__dirname, 'client/public/game.proto');
+    if (fs.existsSync(clientPath)) {
+        res.sendFile(clientPath);
+    } else {
+        // Fallback to root (Production/Server)
+        res.sendFile(path.join(__dirname, 'game.proto'));
+    }
+});
+
+// React Fallback (Last)
+app.get(/.*/, (req, res) => {
+    if (req.path.startsWith('/api')) return res.status(404);
+    res.sendFile(path.join(__dirname, 'client/dist/index.html'));
+});
+
 server.listen(PORT, () => {
-    console.log(`🤖 Binary Chain Server running on http://localhost:${PORT}`);
+    console.log(`🤖 Secure Binary Chain Server running on http://localhost:${PORT}`);
 });
