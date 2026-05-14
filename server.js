@@ -44,6 +44,7 @@ const PORT = process.env.PORT || 3000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 const ACCESS_TOKEN_EXPIRY = '15m';
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
+const HOUSE_EDGE = parseFloat(process.env.HOUSE_EDGE || '0.01');
 
 // ---------------------------------------------------------------------------
 // Express app & middleware
@@ -133,6 +134,14 @@ function authenticateToken(req, res, next) {
     req.user = user;
     next();
   });
+}
+
+// ========== ADMIN MIDDLEWARE ==========
+function requireAdmin(req, res, next) {
+  if (req.user && req.user.username === 'root') {
+    return next();
+  }
+  return res.status(403).json({ error: 'Admin access required' });
 }
 
 // ---------------------------------------------------------------------------
@@ -338,13 +347,14 @@ app.get('/api/state', authenticateToken, async (req, res) => {
   const db = getDb();
   try {
     const user = await db.get(
-      'SELECT balance, server_seed_hash, nonce, client_seed FROM users WHERE id = ?',
+      'SELECT username, balance, server_seed_hash, nonce, client_seed FROM users WHERE id = ?',
       req.user.id
     );
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     res.json({
-      balance: user.balance,             // integer cents
+      username: user.username,    // ← new
+      balance: user.balance,
       serverSeedHash: user.server_seed_hash,
       nonce: user.nonce,
       clientSeed: user.client_seed,
@@ -414,15 +424,26 @@ app.post('/api/bet', authenticateToken, betLimiter, async (req, res) => {
     const nonce = user.nonce;
     const roll = generateFairRoll(serverSeed, clientSeed, nonce);
 
-    // Outcome & multiplier (simplified 2x for Phase 1; will be refined later)
-    const isWin =
-      (condition === 'over' && roll > target) ||
+    // Determine outcome
+    const isWin = (condition === 'over' && roll > target) ||
       (condition === 'under' && roll < target);
-    const multiplier = 2.0; // placeholder
+
+    // ---------- House edge multiplier ----------
+    let winProbability;
+    if (condition === 'over') {
+      winProbability = (100 - target) / 100;
+    } else { // under
+      winProbability = target / 100;
+    }
+
+    // Edge: 1% means we keep 1% of the expected value, payout multiplier = (1-edge) / prob
+    const payoutMultiplier = (1 - HOUSE_EDGE) / winProbability;
+
+    // Profit in cents (integer arithmetic)
     const profitCents = isWin
-      ? Math.floor(betAmountCents * multiplier) - betAmountCents
+      ? Math.floor(betAmountCents * payoutMultiplier) - betAmountCents
       : -betAmountCents;
-    const newBalanceCents = user.balance + profitCents;
+    const newBalanceCents = user.balance + profitCents;   
 
     // Record bet
     await db.run(
@@ -479,9 +500,162 @@ app.post('/api/bet', authenticateToken, betLimiter, async (req, res) => {
     io.to(`user:${req.user.id}`).emit('bet_result', buffer);
 
   } catch (err) {
-    await db.run('ROLLBACK').catch(() => {}); // best effort
+    await db.run('ROLLBACK').catch(() => { }); // best effort
     console.error('Bet transaction failed:', err);
     sendBinaryError(res, 'Internal server error', GameResponse);
+  }
+});
+
+app.post('/api/deposit', authenticateToken, async (req, res) => {
+  const { amount } = req.body; // in dollars
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+  const amountCents = Math.round(amount * 100);
+  const db = getDb();
+
+  // Simulate a deposit "address" and "tx hash"
+  const address = '0x' + crypto.randomBytes(20).toString('hex');
+  const txHash = '0x' + crypto.randomBytes(32).toString('hex');
+
+  try {
+    await db.run(
+      'INSERT INTO deposits (user_id, amount, address, tx_hash) VALUES (?, ?, ?, ?)',
+      [req.user.id, amountCents, address, txHash]
+    );
+    res.json({ address, txHash, amount: amountCents, status: 'pending' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Deposit request failed' });
+  }
+});
+
+app.post('/api/admin/deposit/confirm', authenticateToken, requireAdmin, async (req, res) => {
+  const { depositId } = req.body;
+  if (!depositId) return res.status(400).json({ error: 'Missing depositId' });
+
+  const db = getDb();
+  try {
+    const deposit = await db.get('SELECT * FROM deposits WHERE id = ? AND status = ?', [depositId, 'pending']);
+    if (!deposit) return res.status(404).json({ error: 'Deposit not found or not pending' });
+
+    // Update balance & mark confirmed
+    await db.run('BEGIN IMMEDIATE');
+    await db.run('UPDATE users SET balance = balance + ? WHERE id = ?', [deposit.amount, deposit.user_id]);
+    await db.run('UPDATE deposits SET status = ?, confirmed_at = ? WHERE id = ?', ['confirmed', new Date().toISOString(), depositId]);
+    // Add to ledger
+    await db.run('INSERT INTO transactions (user_id, type, amount, reference_id) VALUES (?, ?, ?, ?)',
+      [deposit.user_id, 'deposit', deposit.amount, depositId]);
+    await db.run('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await db.run('ROLLBACK').catch(() => { });
+    console.error(err);
+    res.status(500).json({ error: 'Confirmation failed' });
+  }
+});
+
+app.post('/api/admin/deposit/reject', authenticateToken, requireAdmin, async (req, res) => {
+  const { depositId } = req.body;
+  if (!depositId) return res.status(400).json({ error: 'Missing depositId' });
+
+  const db = getDb();
+  try {
+    await db.run('UPDATE deposits SET status = ? WHERE id = ? AND status = ?', ['rejected', depositId, 'pending']);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Rejection failed' });
+  }
+});
+
+app.post('/api/withdraw', authenticateToken, async (req, res) => {
+  const { amount, walletAddress } = req.body; // amount in dollars
+  if (!amount || amount <= 0 || !walletAddress) return res.status(400).json({ error: 'Invalid request' });
+
+  const amountCents = Math.round(amount * 100);
+  const db = getDb();
+
+  try {
+    await db.run('BEGIN IMMEDIATE');
+    const user = await db.get('SELECT balance FROM users WHERE id = ?', req.user.id);
+    if (user.balance < amountCents) {
+      await db.run('ROLLBACK');
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    // Deduct balance immediately (will be restored if rejected)
+    await db.run('UPDATE users SET balance = balance - ? WHERE id = ?', [amountCents, req.user.id]);
+    await db.run(
+      'INSERT INTO withdrawals (user_id, amount, wallet_address) VALUES (?, ?, ?)',
+      [req.user.id, amountCents, walletAddress]
+    );
+    await db.run('INSERT INTO transactions (user_id, type, amount, reference_id) VALUES (?, ?, ?, last_insert_rowid())',
+      [req.user.id, 'withdrawal', -amountCents]);
+    await db.run('COMMIT');
+    res.json({ success: true, status: 'pending' });
+  } catch (err) {
+    await db.run('ROLLBACK').catch(() => { });
+    console.error(err);
+    res.status(500).json({ error: 'Withdrawal request failed' });
+  }
+});
+
+app.post('/api/admin/withdraw/approve', authenticateToken, requireAdmin, async (req, res) => {
+  const { withdrawalId } = req.body;
+  if (!withdrawalId) return res.status(400).json({ error: 'Missing withdrawalId' });
+
+  const db = getDb();
+  try {
+    const withdrawal = await db.get('SELECT * FROM withdrawals WHERE id = ? AND status = ?', [withdrawalId, 'pending']);
+    if (!withdrawal) return res.status(404).json({ error: 'Withdrawal not found or not pending' });
+
+    await db.run(
+      'UPDATE withdrawals SET status = ?, approved_by = ?, updated_at = ? WHERE id = ?',
+      ['approved', req.user.id, new Date().toISOString(), withdrawalId]
+    );
+    // Balance was already deducted; nothing else to do
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Approval failed' });
+  }
+});
+
+app.post('/api/admin/withdraw/reject', authenticateToken, requireAdmin, async (req, res) => {
+  const { withdrawalId } = req.body;
+  if (!withdrawalId) return res.status(400).json({ error: 'Missing withdrawalId' });
+
+  const db = getDb();
+  try {
+    const withdrawal = await db.get('SELECT * FROM withdrawals WHERE id = ? AND status = ?', [withdrawalId, 'pending']);
+    if (!withdrawal) return res.status(404).json({ error: 'Withdrawal not found or not pending' });
+
+    await db.run('BEGIN IMMEDIATE');
+    // Refund the user
+    await db.run('UPDATE users SET balance = balance + ? WHERE id = ?', [withdrawal.amount, withdrawal.user_id]);
+    await db.run('UPDATE withdrawals SET status = ?, updated_at = ? WHERE id = ?', ['rejected', new Date().toISOString(), withdrawalId]);
+    // Add reverse entry to ledger
+    await db.run('INSERT INTO transactions (user_id, type, amount, reference_id) VALUES (?, ?, ?, ?)',
+      [withdrawal.user_id, 'withdrawal_reversal', withdrawal.amount, withdrawalId]);
+    await db.run('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await db.run('ROLLBACK').catch(() => { });
+    console.error(err);
+    res.status(500).json({ error: 'Rejection failed' });
+  }
+});
+
+app.get('/api/transactions', authenticateToken, async (req, res) => {
+  const db = getDb();
+  try {
+    const transactions = await db.all(
+      'SELECT * FROM transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+      req.user.id
+    );
+    res.json(transactions);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 });
 
@@ -508,6 +682,18 @@ app.get('/game.proto', (req, res) => {
   } else {
     res.sendFile(path.join(__dirname, 'game.proto'));
   }
+});
+
+app.get('/api/admin/deposits', authenticateToken, requireAdmin, async (req, res) => {
+  const db = getDb();
+  const deposits = await db.all('SELECT * FROM deposits WHERE status = ?', 'pending');
+  res.json(deposits);
+});
+
+app.get('/api/admin/withdrawals', authenticateToken, requireAdmin, async (req, res) => {
+  const db = getDb();
+  const withdrawals = await db.all('SELECT * FROM withdrawals WHERE status = ?', 'pending');
+  res.json(withdrawals);
 });
 
 app.get(/.*/, (req, res) => {

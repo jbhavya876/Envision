@@ -19,6 +19,15 @@ const GamePanel = ({ balance, rollResult, isWin, onPlayGame, isSystemReady }) =>
     const [betAmount, setBetAmount] = useState('10.00');
     const [clientSeed, setClientSeed] = useState('luckyClientSeed123');
 
+    // ========== NEW: Multiplier calculation ==========
+    const houseEdge = 0.01;
+    const target = 50; // static for now, later we can make it dynamic
+    const probabilityOver = (100 - target) / 100;
+    const probabilityUnder = target / 100;
+    const multiplierOver = (1 - houseEdge) / probabilityOver;
+    const multiplierUnder = (1 - houseEdge) / probabilityUnder;
+    // =================================================
+
     /**
      * Handle bet placement
      * @param {string} condition - 'over' or 'under'
@@ -60,6 +69,13 @@ const GamePanel = ({ balance, rollResult, isWin, onPlayGame, isSystemReady }) =>
                 onChange={(e) => setClientSeed(e.target.value)}
                 disabled={!isSystemReady}
             />
+            
+            {/* ========== NEW: Multiplier display ========== */}
+            <div style={{ display: 'flex', gap: '10px', margin: '10px 0' }}>
+                <span>Over {target}: {multiplierOver.toFixed(4)}x</span>
+                <span>Under {target}: {multiplierUnder.toFixed(4)}x</span>
+            </div>
+            {/* ============================================= */}
 
             {/* Bet Buttons */}
             <div className="button-group">

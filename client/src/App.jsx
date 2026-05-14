@@ -15,6 +15,8 @@ import GamePanel from "./components/GamePanel";
 import VerificationPanel from "./components/VerificationPanel";
 import HistoryTable from "./components/HistoryTable";
 import AuthForm from "./components/AuthForm";
+import AdminPanel from "./components/AdminPanel";
+import WalletPanel from "./components/WalletPanel";
 
 /**
  * Wrapper around fetch that includes credentials and silently refreshes
@@ -42,6 +44,30 @@ async function authenticatedFetch(url, options = {}) {
 }
 
 function App() {
+  // ============================================================================
+  // SESSION RECOVERY ON PAGE LOAD
+  // ============================================================================
+
+  useEffect(() => {
+    const tryRecoverSession = async () => {
+      try {
+        // Try to get state with existing cookies
+        const res = await authenticatedFetch("/api/state");
+        if (!res.ok) throw new Error("No session");
+        const data = await res.json();
+        setUsername(data.username || "Unknown");
+        setIsLoggedIn(true);
+        setBalance((data.balance / 100).toFixed(2));
+        setActiveHash(data.serverSeedHash);
+        // No need to set chartData here – fetchInitialState will run after isLoggedIn becomes true
+      } catch (e) {
+        // Not logged in – stay on login form
+      }
+    };
+
+    tryRecoverSession();
+  }, []); // run once on mount
+
   // ============================================================================
   // AUTHENTICATION STATE (no localStorage for token)
   // ============================================================================
@@ -354,6 +380,9 @@ function App() {
         </button>
       </div>
 
+      {username === "root" && <AdminPanel />}
+      <WalletPanel />
+
       <BalanceChart chartData={chartData} />
 
       <div className="main-wrapper">
@@ -383,4 +412,5 @@ function App() {
   );
 }
 
+export { authenticatedFetch };
 export default App;
