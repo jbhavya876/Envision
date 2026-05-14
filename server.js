@@ -443,7 +443,7 @@ app.post('/api/bet', authenticateToken, betLimiter, async (req, res) => {
     const profitCents = isWin
       ? Math.floor(betAmountCents * payoutMultiplier) - betAmountCents
       : -betAmountCents;
-    const newBalanceCents = user.balance + profitCents;   
+    const newBalanceCents = user.balance + profitCents;
 
     // Record bet
     await db.run(
@@ -694,6 +694,107 @@ app.get('/api/admin/withdrawals', authenticateToken, requireAdmin, async (req, r
   const db = getDb();
   const withdrawals = await db.all('SELECT * FROM withdrawals WHERE status = ?', 'pending');
   res.json(withdrawals);
+});
+
+app.get('/api/admin/user/search', authenticateToken, requireAdmin, async (req, res) => {
+  const { username } = req.query;
+  if (!username) return res.status(400).json({ error: 'Missing username' });
+  const db = getDb();
+  try {
+    const user = await db.get(
+      `SELECT id, username, balance, nonce, created_at FROM users WHERE username LIKE ?`,
+      `%${username}%`
+    );
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+app.post('/api/admin/user/rotate-seed', authenticateToken, requireAdmin, async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
+
+  const db = getDb();
+  try {
+    const user = await db.get('SELECT id FROM users WHERE id = ?', userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const newSeed = crypto.randomBytes(32).toString('hex');
+    const newSeedHash = crypto.createHash('sha256').update(newSeed).digest('hex');
+
+    await db.run(
+      'UPDATE users SET server_seed = ?, server_seed_hash = ?, nonce = 0 WHERE id = ?',
+      [newSeed, newSeedHash, userId]
+    );
+    res.json({ success: true, newHash: newSeedHash });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Seed rotation failed' });
+  }
+});
+
+app.post('/api/admin/user/adjust-balance', authenticateToken, requireAdmin, async (req, res) => {
+  const { userId, amount } = req.body; // amount can be positive (credit) or negative (debit) in dollars
+  if (!userId || !amount) return res.status(400).json({ error: 'Missing userId or amount' });
+
+  const amountCents = Math.round(parseFloat(amount) * 100);
+  const db = getDb();
+  try {
+    await db.run('BEGIN IMMEDIATE');
+    const user = await db.get('SELECT balance FROM users WHERE id = ?', userId);
+    if (!user) {
+      await db.run('ROLLBACK');
+      return res.status(404).json({ error: 'User not found' });
+    }
+    await db.run('UPDATE users SET balance = balance + ? WHERE id = ?', [amountCents, userId]);
+    // Log the transaction
+    await db.run(
+      'INSERT INTO transactions (user_id, type, amount, reference_id) VALUES (?, ?, ?, ?)',
+      [userId, amountCents >= 0 ? 'admin_credit' : 'admin_debit', amountCents, null]
+    );
+    await db.run('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await db.run('ROLLBACK').catch(() => {});
+    console.error(err);
+    res.status(500).json({ error: 'Balance adjustment failed' });
+  }
+});
+
+app.get('/api/admin/bets', authenticateToken, requireAdmin, async (req, res) => {
+  const db = getDb();
+  const { limit = 50, offset = 0 } = req.query;
+  try {
+    const bets = await db.all(
+      `SELECT b.*, u.username FROM bets b JOIN users u ON b.user_id = u.id 
+       ORDER BY b.created_at DESC LIMIT ? OFFSET ?`,
+      [parseInt(limit), parseInt(offset)]
+    );
+    res.json(bets);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch bets' });
+  }
+});
+
+app.get('/api/admin/stats', authenticateToken, requireAdmin, async (req, res) => {
+  const db = getDb();
+  try {
+    const stats = await db.get(`
+      SELECT 
+        (SELECT COUNT(*) FROM users) AS totalUsers,
+        (SELECT COUNT(*) FROM bets) AS totalBets,
+        (SELECT COALESCE(SUM(profit), 0) FROM bets WHERE win = 1) AS totalWagered,
+        (SELECT COALESCE(SUM(profit), 0) FROM bets) AS platformProfit
+    `);
+    res.json(stats);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Stats failed' });
+  }
 });
 
 app.get(/.*/, (req, res) => {
