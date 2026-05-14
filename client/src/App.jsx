@@ -17,6 +17,8 @@ import HistoryTable from "./components/HistoryTable";
 import AuthForm from "./components/AuthForm";
 import AdminPanel from "./components/AdminPanel";
 import WalletPanel from "./components/WalletPanel";
+import LiveBets from "./components/LiveBets";
+import Leaderboard from "./components/Leaderboard";
 
 /**
  * Wrapper around fetch that includes credentials and silently refreshes
@@ -67,6 +69,8 @@ function App() {
 
     tryRecoverSession();
   }, []); // run once on mount
+
+  const [socket, setSocket] = useState(null);
 
   // ============================================================================
   // AUTHENTICATION STATE (no localStorage for token)
@@ -183,9 +187,9 @@ function App() {
     if (!isLoggedIn) return;
 
     // 1. Initialize Socket.IO with credentials (cookies)
-    socketRef.current = io(window.location.origin, {
-      withCredentials: true,
-    });
+    const newSocket = io(window.location.origin, { withCredentials: true });
+    socketRef.current = newSocket;
+    setSocket(newSocket);
 
     // 2. Load Protobuf Schema
     protobuf.load("/game.proto", (err, root) => {
@@ -408,6 +412,19 @@ function App() {
       </div>
 
       <HistoryTable history={history} />
+
+      <div
+        style={{
+          display: "flex",
+          gap: "20px",
+          marginTop: "20px",
+          maxWidth: "900px",
+          width: "100%",
+        }}
+      >
+        <LiveBets socket={socket} />
+        <Leaderboard />
+      </div>
     </div>
   );
 }

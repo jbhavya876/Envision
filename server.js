@@ -166,6 +166,7 @@ io.on('connection', (socket) => {
   const userId = socket.user.id;
   console.log(`User ${userId} connected`);
   socket.join(`user:${userId}`);   // private room for this user
+  socket.join('public');
 
   socket.on('disconnect', () => {
     console.log(`User ${userId} disconnected`);
@@ -499,6 +500,20 @@ app.post('/api/bet', authenticateToken, betLimiter, async (req, res) => {
     // Emit privately to this user's socket room
     io.to(`user:${req.user.id}`).emit('bet_result', buffer);
 
+    // Public feed (sanitised)
+    const maskedUsername = req.user.username.substring(0, 3) + '***';
+    const publicBetData = {
+      username: maskedUsername,
+      betAmount: betAmountFloat,
+      target,
+      condition,
+      roll,
+      isWin,
+      profit: profitCents, // in cents
+      timestamp: new Date().toISOString(),
+    };
+    io.to('public').emit('public_bet', publicBetData);
+
   } catch (err) {
     await db.run('ROLLBACK').catch(() => { }); // best effort
     console.error('Bet transaction failed:', err);
@@ -659,6 +674,51 @@ app.get('/api/transactions', authenticateToken, async (req, res) => {
   }
 });
 
+// ========== LEADERBOARD ==========
+app.get('/api/leaderboard', async (req, res) => {
+  const { period = 'daily' } = req.query; // 'daily', 'weekly', 'alltime'
+  const db = getDb();
+
+  let dateCondition;
+  if (period === 'daily') {
+    dateCondition = `b.created_at >= datetime('now', 'start of day')`;
+  } else if (period === 'weekly') {
+    dateCondition = `b.created_at >= datetime('now', '-7 days')`;
+  } else {
+    // alltime – no condition
+    dateCondition = '1=1';
+  }
+
+  try {
+    const leaderboard = await db.all(`
+      SELECT 
+        u.username,
+        COUNT(b.id) as bets,
+        SUM(b.bet_amount) as wagered,
+        SUM(b.profit) as profit
+      FROM bets b
+      JOIN users u ON b.user_id = u.id
+      WHERE ${dateCondition}
+      GROUP BY u.username
+      ORDER BY wagered DESC
+      LIMIT 10
+    `);
+    // Map to a nicer format with masked usernames
+    const result = leaderboard.map((row, index) => ({
+      rank: index + 1,
+      username: row.username,
+      maskedUsername: row.username.substring(0, 3) + '***',
+      bets: row.bets,
+      wagered: row.wagered,
+      profit: row.profit,
+    }));
+    res.json(result);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Leaderboard fetch failed' });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Health check
 // ---------------------------------------------------------------------------
@@ -758,7 +818,7 @@ app.post('/api/admin/user/adjust-balance', authenticateToken, requireAdmin, asyn
     await db.run('COMMIT');
     res.json({ success: true });
   } catch (err) {
-    await db.run('ROLLBACK').catch(() => {});
+    await db.run('ROLLBACK').catch(() => { });
     console.error(err);
     res.status(500).json({ error: 'Balance adjustment failed' });
   }
