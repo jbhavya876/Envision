@@ -9,13 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "socket.io-client": "^4.5.4",
     "chart.js": "^4.4.0",
-    "react-chartjs-2": "^5.2.0",
+    "cookie-parser": "^1.4.7",
+    "crypto-js": "^4.1.1",
     "protobufjs": "^7.2.4",
-    "crypto-js": "^4.1.1"
+    "react": "^18.2.0",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.2.0",
+    "socket.io-client": "^4.5.4"
   },
   "devDependencies": {
     "@types/react": "^18.2.43",

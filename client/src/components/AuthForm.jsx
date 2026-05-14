@@ -1,76 +1,83 @@
-/**
- * @file AuthForm Component
- * @description Login and registration form for user authentication.
- * Handles both login and registration with toggle functionality.
- * 
- * @component
- * @param {Object} props
- * @param {Function} props.onLogin - Callback function called after successful login
- */
+import React, { useState } from "react";
 
-import React, { useState } from 'react';
+function AuthForm({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [error, setError] = useState("");
 
-const AuthForm = ({ onLogin }) => {
-    // Form state
-    const [isRegister, setIsRegister] = useState(false);
-    const [username, setUsername] = useState('');
-    const [password, setPassword] = useState('');
-    const [error, setError] = useState('');
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
 
-    /**
-     * Handle form submission for login or registration
-     * @param {Event} e - Form submit event
-     */
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        setError('');
+    const endpoint = isRegistering ? "/api/register" : "/api/login";
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username, password }),
+      });
 
-        const endpoint = isRegister ? '/api/register' : '/api/login';
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Something went wrong");
+        return;
+      }
 
-        const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password })
+      if (isRegistering) {
+        // Registration successful → auto login
+        const loginRes = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ username, password }),
         });
-
-        const data = await res.json();
-
-        if (data.error) {
-            setError(data.error);
-        } else {
-            if (isRegister) {
-                setIsRegister(false);
-                setError("Registration successful! Please login.");
-            } else {
-                // Success! Pass token up to App
-                onLogin(data.token, data.username);
-            }
+        const loginData = await loginRes.json();
+        if (!loginRes.ok) {
+          setError(loginData.error);
+          return;
         }
-    };
+        onLogin(loginData.username, loginData.balance);
+      } else {
+        onLogin(data.username, data.balance);
+      }
+    } catch (err) {
+      setError("Network error");
+    }
+  };
 
-    return (
-        <div className="container-box" style={{ maxWidth: '300px', margin: '50px auto' }}>
-            <h2>{isRegister ? 'Register' : 'Login'}</h2>
-            <form onSubmit={handleSubmit}>
-                <div style={{ marginBottom: '10px' }}>
-                    <label>Username</label>
-                    <input type="text" value={username} onChange={e => setUsername(e.target.value)} required />
-                </div>
-                <div style={{ marginBottom: '10px' }}>
-                    <label>Password</label>
-                    <input type="password" value={password} onChange={e => setPassword(e.target.value)} required />
-                </div>
-                {error && <p className="loss" style={{ fontSize: '0.8rem' }}>{error}</p>}
-                <button type="submit" className="btn-over" style={{ width: '100%' }}>
-                    {isRegister ? 'Sign Up' : 'Log In'}
-                </button>
-            </form>
-            <p style={{ fontSize: '0.8rem', marginTop: '10px', cursor: 'pointer', color: '#b1bad3' }}
-                onClick={() => setIsRegister(!isRegister)}>
-                {isRegister ? "Already have an account? Login" : "Need an account? Register"}
-            </p>
-        </div>
-    );
-};
+  return (
+    <div className="auth-form">
+      <h2>{isRegistering ? "Register" : "Login"}</h2>
+      <form onSubmit={handleSubmit}>
+        <input
+          type="text"
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          required
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+        />
+        <button type="submit">{isRegistering ? "Register" : "Login"}</button>
+      </form>
+      {error && <p className="error">{error}</p>}
+      <p>
+        <button
+          className="link-button"
+          onClick={() => setIsRegistering(!isRegistering)}
+        >
+          {isRegistering ? "Already have an account? Login" : "New? Register"}
+        </button>
+      </p>
+    </div>
+  );
+}
 
 export default AuthForm;

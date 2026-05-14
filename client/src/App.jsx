@@ -1,15 +1,10 @@
 /**
- * @file Binary Dice Casino - Main Application Component
- * @description Root React component that manages the entire casino application.
- * 
- * Features:
- * - JWT-based authentication with localStorage persistence
- * - Real-time game updates via Socket.IO
- * - Protobuf binary protocol for efficient data transfer
- * - Provably fair gaming with client seed verification
- * - Live balance chart and bet history
- * 
- * @component
+ * @file Binary Dice Casino - Main Application Component (Phase 1 Hardened)
+ * @description Root React component.
+ *   - Uses HttpOnly cookies for authentication (no localStorage token)
+ *   - Silent token refresh on 403 responses
+ *   - Socket.IO with credentials and private rooms
+ *   - Balance displayed as dollars (server returns cents)
  */
 
 import React, { useState, useEffect, useRef } from "react";
@@ -22,27 +17,46 @@ import HistoryTable from "./components/HistoryTable";
 import AuthForm from "./components/AuthForm";
 
 /**
- * Main Application Component
- * Handles authentication, game state, and real-time updates
+ * Wrapper around fetch that includes credentials and silently refreshes
+ * the access token on a 403 response.
  */
+async function authenticatedFetch(url, options = {}) {
+  let res = await fetch(url, { ...options, credentials: "include" });
+
+  if (res.status === 403) {
+    // Try to refresh the token
+    const refreshRes = await fetch("/api/auth/refresh", {
+      method: "POST",
+      credentials: "include",
+    });
+    if (refreshRes.ok) {
+      // Retry the original request
+      res = await fetch(url, { ...options, credentials: "include" });
+    } else {
+      // Refresh failed – force logout
+      window.dispatchEvent(new Event("force-logout"));
+      throw new Error("Session expired");
+    }
+  }
+  return res;
+}
+
 function App() {
   // ============================================================================
-  // AUTHENTICATION STATE
+  // AUTHENTICATION STATE (no localStorage for token)
   // ============================================================================
 
-  /** JWT authentication token from localStorage */
-  const [token, setToken] = useState(localStorage.getItem("token"));
+  /** Whether the user is logged in (true if username is set) */
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
 
   /** Current logged-in username */
-  const [username, setUsername] = useState(
-    localStorage.getItem("username") || ""
-  );
+  const [username, setUsername] = useState("");
 
   // ============================================================================
   // GAME STATE
   // ============================================================================
 
-  /** User's current balance */
+  /** User's current balance in dollars (converted from cents) */
   const [balance, setBalance] = useState("...");
 
   /** Last roll result (0.00-100.00) */
@@ -54,7 +68,7 @@ function App() {
   /** Current server seed hash (for provably fair verification) */
   const [activeHash, setActiveHash] = useState("Loading...");
 
-  /** System ready state - true when Protobuf schema is loaded */
+  /** System ready state – true when Protobuf schema is loaded */
   const [isSystemReady, setIsSystemReady] = useState(false);
 
   // ============================================================================
@@ -97,46 +111,55 @@ function App() {
   // ============================================================================
 
   /**
-   * Handle successful login
-   * Stores token and username in localStorage and updates state
-   * @param {string} newToken - JWT authentication token
-   * @param {string} user - Username
+   * Handle successful login.
+   * The server has already set HttpOnly cookies; we just store the username.
+   * @param {string} user - Username returned by server
+   * @param {number} balanceCents - Initial balance in cents
    */
-  const handleLogin = (newToken, user) => {
-    localStorage.setItem("token", newToken);
-    localStorage.setItem("username", user);
-    setToken(newToken);
+  const handleLogin = (user, balanceCents) => {
     setUsername(user);
+    setIsLoggedIn(true);
+    setBalance((balanceCents / 100).toFixed(2)); // Convert cents to dollars
   };
 
   /**
-   * Handle user logout
-   * Clears localStorage and disconnects Socket.IO
+   * Handle user logout.
+   * Calls the logout endpoint to clear cookies, then resets state.
    */
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("username");
-    setToken(null);
+  const handleLogout = async () => {
+    try {
+      await authenticatedFetch("/api/auth/logout", { method: "POST" });
+    } catch (e) {
+      // ignore errors
+    }
     setUsername("");
+    setIsLoggedIn(false);
+    setBalance("...");
     if (socketRef.current) socketRef.current.disconnect();
   };
+
+  // Listen for a forced logout (e.g., from a failed token refresh)
+  useEffect(() => {
+    const forceLogout = () => handleLogout();
+    window.addEventListener("force-logout", forceLogout);
+    return () => window.removeEventListener("force-logout", forceLogout);
+  }, []);
 
   // ============================================================================
   // INITIALIZATION & REAL-TIME UPDATES
   // ============================================================================
 
   /**
-   * Initialize Socket.IO connection and load Protobuf schema
-   * Runs when component mounts or token changes
+   * Initialize Socket.IO connection and load Protobuf schema.
+   * Runs when isLoggedIn becomes true.
    */
   useEffect(() => {
-    // 🔒 If not logged in, do nothing
-    if (!token) return;
+    if (!isLoggedIn) return;
 
-    // 1. Initialize Socket.IO
-    // Note: If using proxy in vite.config.js, you can just use io()
-    // If explicit URL needed: io('http://localhost:3000')
-    socketRef.current = io();
+    // 1. Initialize Socket.IO with credentials (cookies)
+    socketRef.current = io(window.location.origin, {
+      withCredentials: true,
+    });
 
     // 2. Load Protobuf Schema
     protobuf.load("/game.proto", (err, root) => {
@@ -147,15 +170,12 @@ function App() {
       BetRequestRef.current = root.lookupType("BetRequest");
       GameResponseRef.current = root.lookupType("GameResponse");
 
-      // Mark system as ready
       setIsSystemReady(true);
-
-      // 3. Fetch Initial State
       fetchInitialState();
     });
 
-    // 4. Listen for game updates
-    socketRef.current.on("game-update", (buffer) => {
+    // 3. Listen for private bet_result events
+    socketRef.current.on("bet_result", (buffer) => {
       try {
         if (!GameResponseRef.current) return;
         const uint8 = new Uint8Array(buffer);
@@ -173,44 +193,31 @@ function App() {
         socketRef.current.disconnect();
       }
     };
-  }, [token]);
+  }, [isLoggedIn]);
 
   // ============================================================================
   // API FUNCTIONS
   // ============================================================================
 
   /**
-   * Fetch initial game state from server
-   * Gets user balance, current seed hash, and nonce
+   * Fetch initial game state using authenticated fetch.
    */
   const fetchInitialState = async () => {
     try {
-      const res = await fetch("/api/state", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (res.status === 401 || res.status === 403) {
-        alert("Your session has expired. Please login again.");
-        handleLogout();
-        return;
-      }
-
+      const res = await authenticatedFetch("/api/state");
       if (!res.ok) {
-        console.error("Response not OK:", res.status);
+        console.error("Failed to fetch state:", res.status);
         return;
       }
-
       const data = await res.json();
-      setBalance(data.balance.toFixed(2));
+      // Balance is in cents; convert to dollars for display
+      setBalance((data.balance / 100).toFixed(2));
       setActiveHash(data.serverSeedHash);
 
-      // Sync Chart Logic
       if (data.nonce) {
         setChartData({
           labels: [data.nonce],
-          data: [data.balance],
+          data: [data.balance / 100],
         });
       }
     } catch (error) {
@@ -219,21 +226,16 @@ function App() {
   };
 
   /**
-   * Place a bet on the dice game
-   * @param {number} betAmount - Amount to wager
-   * @param {string} clientSeed - Client-provided randomness seed
-   * @param {string} condition - 'over' or 'under'
+   * Place a bet.
    */
   const handlePlayGame = async (betAmount, clientSeed, condition) => {
-    // 1. Check if System is Ready
     if (!BetRequestRef.current || !isSystemReady) {
-      console.error("System/Protobuf not ready!");
+      console.error("System not ready");
       return;
     }
 
     const payload = { betAmount, target: 50, condition, clientSeed };
 
-    // 2. Verify & Encode
     const err = BetRequestRef.current.verify(payload);
     if (err) return alert(err);
 
@@ -241,21 +243,21 @@ function App() {
     const buffer = BetRequestRef.current.encode(message).finish();
 
     try {
-      // 3. Send Request
-      const res = await fetch("/api/bet", {
+      const res = await authenticatedFetch("/api/bet", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/octet-stream" },
         body: buffer,
       });
 
-      // 4. Handle Auth Errors
-      if (res.status === 401 || res.status === 403) {
-        alert("Session expired. Please login again.");
-        handleLogout();
+      if (!res.ok) {
+        console.error("Bet failed:", res.status);
+        // The socket will not fire if the server rejected the bet,
+        // so we might want to show an error here.
+        return;
       }
+      // DO NOT manually decode the response here – the socket event will update the UI.
+      // If you want immediate feedback, you can still decode, but then skip the socket update
+      // to avoid double entries. We'll rely solely on the socket.
     } catch (error) {
       console.error("Error placing bet:", error);
     }
@@ -266,22 +268,21 @@ function App() {
   // ============================================================================
 
   /**
-   * Update dashboard with new game results
-   * Updates balance, history, chart, and verification data
-   * @param {Object} data - Game response data from server
+   * Update dashboard with new game results.
+   * @param {Object} data - Game response data (profit & newBalance are in cents)
    */
   const updateDashboard = (data) => {
     setRollResult(data.roll.toFixed(2));
     setIsWin(data.isWin);
-    setBalance(data.newBalance.toFixed(2));
+    // Convert cents to dollars
+    setBalance((data.newBalance / 100).toFixed(2));
     setActualRoll(data.roll);
 
     setLastSeed(data.serverSeedRevealed);
     setLastClientSeed(data.clientSeed);
     setLastNonce(data.nonce);
-    setActiveHash(
-      "Hash of: " + data.serverSeedRevealed.substring(0, 20) + "..."
-    );
+    // Show the hash for next round (we got nextServerSeedHash)
+    setActiveHash(data.nextServerSeedHash);
 
     setHistory((prev) => {
       const newHistory = [
@@ -289,7 +290,7 @@ function App() {
           nonce: data.nonce,
           roll: data.roll,
           betAmount: data.betAmount,
-          profit: data.profit,
+          profit: data.profit, // still in cents, can be displayed after conversion if needed
           isWin: data.isWin,
         },
         ...prev,
@@ -299,7 +300,7 @@ function App() {
 
     setChartData((prev) => {
       const newLabels = [...prev.labels, data.nonce];
-      const newData = [...prev.data, data.newBalance];
+      const newData = [...prev.data, data.newBalance / 100]; // Convert cents to dollars for chart
       if (newLabels.length > 50) {
         newLabels.shift();
         newData.shift();
@@ -308,14 +309,14 @@ function App() {
     });
   };
 
-  // --- RENDER ---
+  // ============================================================================
+  // RENDER
+  // ============================================================================
 
-  // 1. If no token, show Login Screen
-  if (!token) {
+  if (!isLoggedIn) {
     return <AuthForm onLogin={handleLogin} />;
   }
 
-  // 2. If Logged In, show Game
   return (
     <div className="app-container">
       {/* Header Bar */}

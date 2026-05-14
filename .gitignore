@@ -36,3 +36,4 @@ client/dist-ssr
 .env
 .env.local
 .env.*.local
+chain.json

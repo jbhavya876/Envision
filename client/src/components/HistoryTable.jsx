@@ -1,47 +1,31 @@
-/**
- * @file HistoryTable Component
- * @description Displays the last 15 bets in a table format.
- * Shows nonce, roll result, bet amount, and profit/loss.
- * 
- * @component
- * @param {Object} props
- * @param {Array<Object>} props.history - Array of bet history objects
- */
+import React from "react";
 
-import React from 'react';
-
-const HistoryTable = ({ history }) => {
-    return (
-        <div className="history-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Nonce</th>
-                        <th>Result</th>
-                        <th>Bet</th>
-                        <th>Profit</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {history.map((bet, index) => {
-                        const profitClass = bet.isWin ? 'col-green' : 'col-red';
-                        const profitSign = bet.isWin ? '+' : '';
-
-                        return (
-                            <tr key={index}>
-                                <td className="col-mute">{bet.nonce}</td>
-                                <td className={profitClass}>{bet.roll.toFixed(2)}</td>
-                                <td className="col-mute">${bet.betAmount.toFixed(2)}</td>
-                                <td className={profitClass}>
-                                    {profitSign}{bet.profit.toFixed(2)}
-                                </td>
-                            </tr>
-                        );
-                    })}
-                </tbody>
-            </table>
-        </div>
-    );
-};
+function HistoryTable({ history }) {
+  return (
+    <div className="history-table">
+      <h3>Bet History</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Roll</th>
+            <th>Bet</th>
+            <th>Profit</th>
+          </tr>
+        </thead>
+        <tbody>
+          {history.map((bet, idx) => (
+            <tr key={idx} className={bet.isWin ? "win" : "loss"}>
+              <td>{bet.nonce}</td>
+              <td>{bet.roll.toFixed(2)}</td>
+              <td>{bet.betAmount.toFixed(2)}</td>
+              <td>{(bet.profit / 100).toFixed(2)}</td>  {/* cents → dollars */}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export default HistoryTable;
