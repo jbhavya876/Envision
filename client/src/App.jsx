@@ -1,13 +1,12 @@
 /**
- * @file Binary Dice Casino - Main Application Component (Phase 1 Hardened)
+ * @file Binary Dice Casino - Main Application Component (Phase 2 Complete)
  * @description Root React component.
- *   - Uses HttpOnly cookies for authentication (no localStorage token)
- *   - Silent token refresh on 403 responses
- *   - Socket.IO with credentials and private rooms
- *   - Balance displayed as dollars (server returns cents)
+ *   - HttpOnly JWT auth with silent refresh
+ *   - Game tabs: Dice, Crash, Mines
+ *   - Live bets feed, leaderboard, admin & wallet panels
  */
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { io } from "socket.io-client";
 import protobuf from "protobufjs";
 import BalanceChart from "./components/BalanceChart";
@@ -19,6 +18,8 @@ import AdminPanel from "./components/AdminPanel";
 import WalletPanel from "./components/WalletPanel";
 import LiveBets from "./components/LiveBets";
 import Leaderboard from "./components/Leaderboard";
+import CrashGame from "./components/CrashGame";
+import MinesGame from "./components/MinesGame";
 
 /**
  * Wrapper around fetch that includes credentials and silently refreshes
@@ -28,16 +29,13 @@ async function authenticatedFetch(url, options = {}) {
   let res = await fetch(url, { ...options, credentials: "include" });
 
   if (res.status === 403) {
-    // Try to refresh the token
     const refreshRes = await fetch("/api/auth/refresh", {
       method: "POST",
       credentials: "include",
     });
     if (refreshRes.ok) {
-      // Retry the original request
       res = await fetch(url, { ...options, credentials: "include" });
     } else {
-      // Refresh failed – force logout
       window.dispatchEvent(new Event("force-logout"));
       throw new Error("Session expired");
     }
@@ -47,13 +45,45 @@ async function authenticatedFetch(url, options = {}) {
 
 function App() {
   // ============================================================================
-  // SESSION RECOVERY ON PAGE LOAD
+  // AUTHENTICATION & GAME MODE STATE
   // ============================================================================
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [username, setUsername] = useState("");
+  const [socket, setSocket] = useState(null);
+  const [activeGame, setActiveGame] = useState("dice");
 
+  // ============================================================================
+  // GAME STATE (shared)
+  // ============================================================================
+  const [balance, setBalance] = useState("...");
+  const [rollResult, setRollResult] = useState("0.00");
+  const [isWin, setIsWin] = useState(null);
+  const [activeHash, setActiveHash] = useState("Loading...");
+  const [isSystemReady, setIsSystemReady] = useState(false);
+
+  // ============================================================================
+  // DICE‑SPECIFIC VERIFICATION STATE
+  // ============================================================================
+  const [lastSeed, setLastSeed] = useState("No bets yet");
+  const [lastNonce, setLastNonce] = useState("-");
+  const [lastClientSeed, setLastClientSeed] = useState("");
+  const [actualRoll, setActualRoll] = useState(0);
+  const [history, setHistory] = useState([]);
+  const [chartData, setChartData] = useState({ labels: [], data: [] });
+
+  // ============================================================================
+  // REFS
+  // ============================================================================
+  const socketRef = useRef(null);
+  const BetRequestRef = useRef(null);
+  const GameResponseRef = useRef(null);
+
+  // ============================================================================
+  // SESSION RECOVERY (page load)
+  // ============================================================================
   useEffect(() => {
     const tryRecoverSession = async () => {
       try {
-        // Try to get state with existing cookies
         const res = await authenticatedFetch("/api/state");
         if (!res.ok) throw new Error("No session");
         const data = await res.json();
@@ -61,114 +91,32 @@ function App() {
         setIsLoggedIn(true);
         setBalance((data.balance / 100).toFixed(2));
         setActiveHash(data.serverSeedHash);
-        // No need to set chartData here – fetchInitialState will run after isLoggedIn becomes true
       } catch (e) {
-        // Not logged in – stay on login form
+        // stay on login form
       }
     };
-
     tryRecoverSession();
-  }, []); // run once on mount
-
-  const [socket, setSocket] = useState(null);
+  }, []);
 
   // ============================================================================
-  // AUTHENTICATION STATE (no localStorage for token)
+  // AUTH HANDLERS
   // ============================================================================
-
-  /** Whether the user is logged in (true if username is set) */
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-
-  /** Current logged-in username */
-  const [username, setUsername] = useState("");
-
-  // ============================================================================
-  // GAME STATE
-  // ============================================================================
-
-  /** User's current balance in dollars (converted from cents) */
-  const [balance, setBalance] = useState("...");
-
-  /** Last roll result (0.00-100.00) */
-  const [rollResult, setRollResult] = useState("0.00");
-
-  /** Whether the last bet was a win */
-  const [isWin, setIsWin] = useState(null);
-
-  /** Current server seed hash (for provably fair verification) */
-  const [activeHash, setActiveHash] = useState("Loading...");
-
-  /** System ready state – true when Protobuf schema is loaded */
-  const [isSystemReady, setIsSystemReady] = useState(false);
-
-  // ============================================================================
-  // PROVABLY FAIR VERIFICATION STATE
-  // ============================================================================
-
-  /** Last revealed server seed */
-  const [lastSeed, setLastSeed] = useState("No bets yet");
-
-  /** Last nonce (bet number) */
-  const [lastNonce, setLastNonce] = useState("-");
-
-  /** Last client seed used */
-  const [lastClientSeed, setLastClientSeed] = useState("");
-
-  /** Actual roll result for verification */
-  const [actualRoll, setActualRoll] = useState(0);
-
-  /** Bet history (last 15 bets) */
-  const [history, setHistory] = useState([]);
-
-  /** Chart data for balance visualization */
-  const [chartData, setChartData] = useState({ labels: [], data: [] });
-
-  // ============================================================================
-  // REFS FOR SOCKET.IO AND PROTOBUF
-  // ============================================================================
-
-  /** Socket.IO connection reference */
-  const socketRef = useRef(null);
-
-  /** Protobuf BetRequest message type */
-  const BetRequestRef = useRef(null);
-
-  /** Protobuf GameResponse message type */
-  const GameResponseRef = useRef(null);
-
-  // ============================================================================
-  // AUTHENTICATION HANDLERS
-  // ============================================================================
-
-  /**
-   * Handle successful login.
-   * The server has already set HttpOnly cookies; we just store the username.
-   * @param {string} user - Username returned by server
-   * @param {number} balanceCents - Initial balance in cents
-   */
   const handleLogin = (user, balanceCents) => {
     setUsername(user);
     setIsLoggedIn(true);
-    setBalance((balanceCents / 100).toFixed(2)); // Convert cents to dollars
+    setBalance((balanceCents / 100).toFixed(2));
   };
 
-  /**
-   * Handle user logout.
-   * Calls the logout endpoint to clear cookies, then resets state.
-   */
   const handleLogout = async () => {
     try {
       await authenticatedFetch("/api/auth/logout", { method: "POST" });
-    } catch (e) {
-      // ignore errors
-    }
+    } catch (e) {}
     setUsername("");
     setIsLoggedIn(false);
     setBalance("...");
     if (socketRef.current) socketRef.current.disconnect();
   };
 
-  // Listen for a forced logout (e.g., from a failed token refresh)
   useEffect(() => {
     const forceLogout = () => handleLogout();
     window.addEventListener("force-logout", forceLogout);
@@ -176,22 +124,15 @@ function App() {
   }, []);
 
   // ============================================================================
-  // INITIALIZATION & REAL-TIME UPDATES
+  // SOCKET & PROTOBUF INITIALIZATION
   // ============================================================================
-
-  /**
-   * Initialize Socket.IO connection and load Protobuf schema.
-   * Runs when isLoggedIn becomes true.
-   */
   useEffect(() => {
     if (!isLoggedIn) return;
 
-    // 1. Initialize Socket.IO with credentials (cookies)
     const newSocket = io(window.location.origin, { withCredentials: true });
     socketRef.current = newSocket;
     setSocket(newSocket);
 
-    // 2. Load Protobuf Schema
     protobuf.load("/game.proto", (err, root) => {
       if (err) {
         alert("Failed to load binary schema");
@@ -199,13 +140,12 @@ function App() {
       }
       BetRequestRef.current = root.lookupType("BetRequest");
       GameResponseRef.current = root.lookupType("GameResponse");
-
       setIsSystemReady(true);
       fetchInitialState();
     });
 
-    // 3. Listen for private bet_result events
-    socketRef.current.on("bet_result", (buffer) => {
+    // Dice bet results
+    newSocket.on("bet_result", (buffer) => {
       try {
         if (!GameResponseRef.current) return;
         const uint8 = new Uint8Array(buffer);
@@ -217,47 +157,53 @@ function App() {
       }
     });
 
-    // Cleanup
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
+    // Crash & Mines results – update balance
+    newSocket.on("crash:result", (data) => {
+      if (data.win) {
+        // profit is in cents
+        const newBalanceCents = Math.round((parseFloat(balance) * 100) + data.profit);
+        setBalance((newBalanceCents / 100).toFixed(2));
+      } else {
+        // bet was already deducted, no change needed (just refetch maybe)
+        fetchInitialState(); // safe refresh
       }
+    });
+
+    newSocket.on("mines:result", (data) => {
+      if (data.win) {
+        const newBalanceCents = Math.round((parseFloat(balance) * 100) + data.profit);
+        setBalance((newBalanceCents / 100).toFixed(2));
+      } else {
+        fetchInitialState();
+      }
+    });
+
+    return () => {
+      if (socketRef.current) socketRef.current.disconnect();
     };
   }, [isLoggedIn]);
 
   // ============================================================================
-  // API FUNCTIONS
+  // FETCH INITIAL STATE
   // ============================================================================
-
-  /**
-   * Fetch initial game state using authenticated fetch.
-   */
   const fetchInitialState = async () => {
     try {
       const res = await authenticatedFetch("/api/state");
-      if (!res.ok) {
-        console.error("Failed to fetch state:", res.status);
-        return;
-      }
+      if (!res.ok) return;
       const data = await res.json();
-      // Balance is in cents; convert to dollars for display
       setBalance((data.balance / 100).toFixed(2));
       setActiveHash(data.serverSeedHash);
-
       if (data.nonce) {
-        setChartData({
-          labels: [data.nonce],
-          data: [data.balance / 100],
-        });
+        setChartData({ labels: [data.nonce], data: [data.balance / 100] });
       }
     } catch (error) {
       console.error("Error fetching initial state:", error);
     }
   };
 
-  /**
-   * Place a bet.
-   */
+  // ============================================================================
+  // DICE BET HANDLER
+  // ============================================================================
   const handlePlayGame = async (betAmount, clientSeed, condition) => {
     if (!BetRequestRef.current || !isSystemReady) {
       console.error("System not ready");
@@ -265,7 +211,6 @@ function App() {
     }
 
     const payload = { betAmount, target: 50, condition, clientSeed };
-
     const err = BetRequestRef.current.verify(payload);
     if (err) return alert(err);
 
@@ -278,40 +223,26 @@ function App() {
         headers: { "Content-Type": "application/octet-stream" },
         body: buffer,
       });
-
       if (!res.ok) {
         console.error("Bet failed:", res.status);
-        // The socket will not fire if the server rejected the bet,
-        // so we might want to show an error here.
-        return;
       }
-      // DO NOT manually decode the response here – the socket event will update the UI.
-      // If you want immediate feedback, you can still decode, but then skip the socket update
-      // to avoid double entries. We'll rely solely on the socket.
     } catch (error) {
       console.error("Error placing bet:", error);
     }
   };
 
   // ============================================================================
-  // UI UPDATE HANDLER
+  // DICE UI UPDATE
   // ============================================================================
-
-  /**
-   * Update dashboard with new game results.
-   * @param {Object} data - Game response data (profit & newBalance are in cents)
-   */
   const updateDashboard = (data) => {
     setRollResult(data.roll.toFixed(2));
     setIsWin(data.isWin);
-    // Convert cents to dollars
     setBalance((data.newBalance / 100).toFixed(2));
     setActualRoll(data.roll);
 
     setLastSeed(data.serverSeedRevealed);
     setLastClientSeed(data.clientSeed);
     setLastNonce(data.nonce);
-    // Show the hash for next round (we got nextServerSeedHash)
     setActiveHash(data.nextServerSeedHash);
 
     setHistory((prev) => {
@@ -320,7 +251,7 @@ function App() {
           nonce: data.nonce,
           roll: data.roll,
           betAmount: data.betAmount,
-          profit: data.profit, // still in cents, can be displayed after conversion if needed
+          profit: data.profit,
           isWin: data.isWin,
         },
         ...prev,
@@ -330,7 +261,7 @@ function App() {
 
     setChartData((prev) => {
       const newLabels = [...prev.labels, data.nonce];
-      const newData = [...prev.data, data.newBalance / 100]; // Convert cents to dollars for chart
+      const newData = [...prev.data, data.newBalance / 100];
       if (newLabels.length > 50) {
         newLabels.shift();
         newData.shift();
@@ -342,7 +273,6 @@ function App() {
   // ============================================================================
   // RENDER
   // ============================================================================
-
   if (!isLoggedIn) {
     return <AuthForm onLogin={handleLogin} />;
   }
@@ -387,33 +317,78 @@ function App() {
       {username === "root" && <AdminPanel />}
       <WalletPanel />
 
-      <BalanceChart chartData={chartData} />
-
-      <div className="main-wrapper">
-        <div className="game-column">
-          <GamePanel
-            balance={balance}
-            rollResult={rollResult}
-            isWin={isWin}
-            onPlayGame={handlePlayGame}
-            isSystemReady={isSystemReady}
-            socket={socket}
-          />
-        </div>
-
-        <div className="game-column">
-          <VerificationPanel
-            activeHash={activeHash}
-            lastSeed={lastSeed}
-            lastNonce={lastNonce}
-            lastClientSeed={lastClientSeed}
-            actualRoll={actualRoll}
-          />
-        </div>
+      {/* Game Tabs */}
+      <div style={{ display: "flex", gap: "10px", marginBottom: "10px", maxWidth: "900px", width: "100%" }}>
+        {["dice", "crash", "mines"].map((game) => (
+          <button
+            key={game}
+            onClick={() => setActiveGame(game)}
+            style={{
+              background: activeGame === game ? "#00ff88" : "#2f4553",
+              color: activeGame === game ? "#000" : "#fff",
+              border: "none",
+              padding: "10px 20px",
+              borderRadius: "5px",
+              cursor: "pointer",
+              fontWeight: "bold",
+            }}
+          >
+            {game.toUpperCase()}
+          </button>
+        ))}
       </div>
 
-      <HistoryTable history={history} />
+      {/* Dice Game */}
+      {activeGame === "dice" && (
+        <>
+          <BalanceChart chartData={chartData} />
+          <div className="main-wrapper">
+            <div className="game-column">
+              <GamePanel
+                balance={balance}
+                rollResult={rollResult}
+                isWin={isWin}
+                onPlayGame={handlePlayGame}
+                isSystemReady={isSystemReady}
+                socket={socket}
+              />
+            </div>
+            <div className="game-column">
+              <VerificationPanel
+                activeHash={activeHash}
+                lastSeed={lastSeed}
+                lastNonce={lastNonce}
+                lastClientSeed={lastClientSeed}
+                actualRoll={actualRoll}
+              />
+            </div>
+          </div>
+          <HistoryTable history={history} />
+        </>
+      )}
 
+      {/* Crash Game */}
+      {activeGame === "crash" && (
+        <CrashGame
+          socket={socket}
+          balance={balance}
+          onResult={(data) => {
+            // optional callback for extra handling
+          }}
+        />
+      )}
+
+      {/* Mines Game */}
+      {activeGame === "mines" && (
+        <MinesGame
+          socket={socket}
+          onResult={(data) => {
+            // optional callback
+          }}
+        />
+      )}
+
+      {/* Live Bets & Leaderboard (always visible) */}
       <div
         style={{
           display: "flex",
