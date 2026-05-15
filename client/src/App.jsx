@@ -397,6 +397,7 @@ function App() {
             isWin={isWin}
             onPlayGame={handlePlayGame}
             isSystemReady={isSystemReady}
+            socket={socket}
           />
         </div>
 

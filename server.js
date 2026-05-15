@@ -162,13 +162,139 @@ io.use((socket, next) => {
   });
 });
 
+// ========== AUTO-BET ENGINE ==========
+const activeAutoBets = new Map(); // userId -> { intervalId, config }
+
+async function executeAutoBet(userId, config) {
+  const { betAmount, condition, clientSeed, stopOnProfit, stopOnLoss, maxBets } = config;
+  const db = getDb();
+  let betCount = 0;
+  let sessionProfit = 0;
+
+  const loop = async () => {
+    // Check if user still wants to continue
+    if (!activeAutoBets.has(userId)) return;
+
+    // Stop conditions
+    if (maxBets && betCount >= maxBets) {
+      stopAutoBet(userId);
+      return;
+    }
+    if (stopOnProfit && sessionProfit >= stopOnProfit) {
+      stopAutoBet(userId);
+      return;
+    }
+    if (stopOnLoss && sessionProfit <= -stopOnLoss) {
+      stopAutoBet(userId);
+      return;
+    }
+
+    try {
+      // Re‑use the same bet logic (atomic transaction)
+      await db.run('BEGIN IMMEDIATE');
+      const user = await db.get(
+        'SELECT balance, server_seed, server_seed_hash, nonce FROM users WHERE id = ?',
+        userId
+      );
+      if (!user || user.balance < Math.round(betAmount * 100)) {
+        await db.run('ROLLBACK');
+        stopAutoBet(userId);
+        return;
+      }
+
+      const nonce = user.nonce;
+      const serverSeed = user.server_seed;
+      const roll = generateFairRoll(serverSeed, clientSeed, nonce);
+
+      const isWin = (condition === 'over' && roll > 50) || (condition === 'under' && roll < 50);
+      const winProbability = 0.5;
+      const payoutMultiplier = (1 - HOUSE_EDGE) / winProbability;
+      const betAmountCents = Math.round(betAmount * 100);
+      const profitCents = isWin
+        ? Math.floor(betAmountCents * payoutMultiplier) - betAmountCents
+        : -betAmountCents;
+      const newBalanceCents = user.balance + profitCents;
+
+      // Record bet
+      const { lastID } = await db.run(
+        `INSERT INTO bets (user_id, bet_amount, target, condition, roll, win, profit,
+          server_seed_hash, server_seed, client_seed, nonce)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [userId, betAmountCents, 50, condition, roll, isWin ? 1 : 0, profitCents,
+          user.server_seed_hash, serverSeed, clientSeed, nonce]
+      );
+      await db.run('UPDATE users SET balance = ?, nonce = nonce + 1, client_seed = ? WHERE id = ?',
+        [newBalanceCents, clientSeed, userId]);
+      await db.run('INSERT INTO transactions (user_id, type, amount, reference_id) VALUES (?, ?, ?, ?)',
+        [userId, 'bet', profitCents, lastID]);
+      await db.run('COMMIT');
+
+      sessionProfit += profitCents;
+      betCount++;
+
+      // Emit private result
+      const responsePayload = {
+        roll, isWin, profit: profitCents, newBalance: newBalanceCents,
+        betAmount, serverSeedRevealed: serverSeed, clientSeed, nonce,
+        nextServerSeedHash: user.server_seed_hash, error: ''
+      };
+      const message = GameResponse.create(responsePayload);
+      const buffer = GameResponse.encode(message).finish();
+      io.to(`user:${userId}`).emit('bet_result', buffer);
+
+      // Public feed
+      const maskedUsername = (await db.get('SELECT username FROM users WHERE id = ?', userId)).username.substring(0, 3) + '***';
+      io.to('public').emit('public_bet', {
+        username: maskedUsername, betAmount, target: 50, condition,
+        roll, isWin, profit: profitCents, timestamp: new Date().toISOString()
+      });
+
+    } catch (err) {
+      await db.run('ROLLBACK').catch(() => { });
+      console.error(`Auto-bet error for user ${userId}:`, err);
+    }
+  };
+
+  // Run loop every 1.5 seconds (adjustable)
+  const intervalId = setInterval(loop, 1500);
+  activeAutoBets.set(userId, { intervalId, config, startTime: Date.now() });
+}
+
+function stopAutoBet(userId) {
+  const session = activeAutoBets.get(userId);
+  if (session) {
+    clearInterval(session.intervalId);
+    activeAutoBets.delete(userId);
+    io.to(`user:${userId}`).emit('auto_bet:stopped', { message: 'Auto-bet stopped' });
+  }
+}
+
 io.on('connection', (socket) => {
   const userId = socket.user.id;
   console.log(`User ${userId} connected`);
   socket.join(`user:${userId}`);   // private room for this user
   socket.join('public');
 
+  socket.on('auto_bet:start', (config) => {
+    const userId = socket.user.id;
+    // Validate config
+    if (!config.betAmount || !config.condition) {
+      return socket.emit('auto_bet:error', { message: 'Invalid config' });
+    }
+    // Stop any existing session
+    stopAutoBet(userId);
+    // Start new session
+    executeAutoBet(userId, config);
+    socket.emit('auto_bet:started', { message: 'Auto-bet started' });
+  });
+
+  socket.on('auto_bet:stop', () => {
+    const userId = socket.user.id;
+    stopAutoBet(userId);
+  });
+
   socket.on('disconnect', () => {
+    stopAutoBet(userId);
     console.log(`User ${userId} disconnected`);
   });
 });
